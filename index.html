@@ -509,6 +509,11 @@
             <p class="text-[10px] text-amber-400/80 bg-amber-950/30 border border-amber-800/40 py-1.5 px-2 rounded-lg">
                 ⚠️ 導出期間請勿關閉視窗或切換分頁
             </p>
+            <div id="exportDone" class="hidden space-y-2">
+                <p id="exportDoneMsg" class="text-xs text-slate-300"></p>
+                <a id="exportDownloadLink" class="block bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-semibold text-sm px-4 py-2.5 rounded-lg cursor-pointer">⬇ 點此下載影片</a>
+                <button type="button" onclick="closeExportModal()" class="text-xs text-slate-400 hover:text-slate-200 underline">關閉</button>
+            </div>
         </div>
     </div>
 
@@ -1522,6 +1527,7 @@
             state.isExporting = true; snapFor = -1;
             canvas.width = W; canvas.height = H; expK = W / prevW;
             $('exportInfo').innerText = `輸出 ${W}x${H}・約 ${(bps / 1e6).toFixed(0)} Mbps・${ext.toUpperCase()}${writer ? '・直接寫入硬碟' : ''}`;
+            $('exportDone').classList.add('hidden'); document.querySelector('#exportModal h3').innerText = '影片導出中...';
             $('exportModal').classList.remove('hidden');
             let audioTracks = [];
             try { audioTracks = getAudioDestination().stream.getAudioTracks(); } catch (e) {}
@@ -1529,19 +1535,45 @@
             let rec;
             try { rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: bps, audioBitsPerSecond: 192000 }); }
             catch (e) { rec = new MediaRecorder(stream); }
-            const chunks = []; let chain = Promise.resolve();
-            rec.ondataavailable = e => { if (!e.data || !e.data.size) return; if (writer) chain = chain.then(() => writer.write(e.data)); else chunks.push(e.data); };
+            const chunks = []; let chain = Promise.resolve(); let writeFailed = false;
+            rec.ondataavailable = e => {
+                if (!e.data || !e.data.size) return;
+                if (writer && !writeFailed) {
+                    chain = chain.then(() => writer.write(e.data)).catch(err => { writeFailed = true; console.error(err); });
+                } else chunks.push(e.data);
+            };
+            rec.onerror = e => { console.error(e); };
             rec.onstop = async () => {
-                await chain;
-                if (writer) await writer.close();
-                else {
-                    const url = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType || 'video/' + ext }));
-                    const a = document.createElement('a'); a.style.display = 'none'; a.href = url; a.download = `基礎影片編輯器_${Date.now()}.${ext}`;
-                    document.body.appendChild(a); a.click(); setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 500);
+                let savedToDisk = false;
+                try {
+                    await chain;
+                    if (writer && !writeFailed) { await writer.close(); savedToDisk = true; }
+                } catch (err) { console.error(err); savedToDisk = false; }
+                state.isExporting = false;
+                if (writer && !savedToDisk) {
+                    $('exportModal').classList.add('hidden');
+                    updateAspectCanvasSize(); goClip(0, 0, false);
+                    showToast('寫入硬碟失敗（空間不足？），請換位置再導出一次');
+                    return;
                 }
-                state.isExporting = false; $('exportModal').classList.add('hidden');
+                const blob = new Blob(chunks, { type: (rec.mimeType || 'video/' + ext).split(';')[0] });
+                chunks.length = 0;
+                const name = `基礎影片編輯器_${Date.now()}.${ext}`;
+                if (savedToDisk) {
+                    $('exportModal').classList.add('hidden');
+                    showToast('影片導出完成！已存到你選的位置');
+                } else {
+                    // Show a real button: a click is a user gesture, so the browser will not block the download
+                    if (window._exportUrl) URL.revokeObjectURL(window._exportUrl);
+                    window._exportUrl = URL.createObjectURL(blob);
+                    const link = $('exportDownloadLink');
+                    link.href = window._exportUrl; link.download = name;
+                    $('exportDoneMsg').innerText = `導出完成（${(blob.size / 1048576).toFixed(0)} MB）。若沒有自動下載，請按下面的按鈕。`;
+                    $('exportDone').classList.remove('hidden');
+                    document.querySelector('#exportModal h3').innerText = '影片已完成';
+                    try { link.click(); } catch (err) {}
+                }
                 updateAspectCanvasSize(); goClip(0, 0, false);
-                showToast('影片導出完成！' + (writer ? '已存到你選的位置' : '已自動下載'));
             };
             state.mediaRecorder = rec; rec.start(1000);
             if (state.hasBgm && bgm.src) { bgm.currentTime = 0; bgm.play().catch(() => {}); }
@@ -1553,6 +1585,10 @@
                 $('exportProgressBar').style.width = pct + '%'; $('exportProgressText').innerText = pct + '%';
                 $('exportTimeText').innerText = `${formatTime(T)} / ${formatTime(total())}`;
             }, 200);
+        }
+        function closeExportModal() {
+            $('exportModal').classList.add('hidden');
+            setTimeout(() => { if (window._exportUrl) { URL.revokeObjectURL(window._exportUrl); window._exportUrl = null; } }, 60000);
         }
         function finishExport() {
             pauseVideo();
